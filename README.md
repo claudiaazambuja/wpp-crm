@@ -15,14 +15,14 @@ Na tela de entrada, **Explorar demonstração** abre dados fictícios mantidos a
 
 ## Ativar o Supabase
 
-1. No projeto `licishnowcussmirivuf`, abra **SQL Editor** e execute uma única vez `supabase/migrations/202609290001_initial.sql`.
+1. No projeto `licishnowcussmirivuf`, abra **SQL Editor** e execute uma única vez cada arquivo de `supabase/migrations`, na ordem do nome.
 2. Copie `.env.example` para `.env.local` e preencha a chave **publishable**. Nunca use chave secret/service_role em variáveis `VITE_*`.
 3. Reinicie o Vite. Ative o provedor Email no Supabase Auth e configure a URL do aplicativo e os redirecionamentos permitidos. Para desenvolvimento, use `http://127.0.0.1:5173`; para produção, a URL do domínio publicado.
 4. Em Authentication → Sign In / Providers, desative **Allow new users to sign up**. Confirme que **Allow anonymous sign-ins** também está desativado. Esta configuração no servidor é obrigatória: remover o formulário não bloqueia a API.
 5. Em Authentication → URL Configuration, use `https://proxima-crm.vercel.app` como Site URL e permita `https://proxima-crm.vercel.app/**` nos redirecionamentos.
 6. A conta administradora convida profissionais pela tela Convites da Próxima. O convidado abre o e-mail, define sua própria senha e preenche o perfil. Não divulgue a chave secret nem compartilhe o painel administrativo.
 
-**Situação da entrega:** a migração está no projeto e é testada localmente. As duas migrações foram aplicadas ao Supabase remoto em 29/09/2026 pelo SQL Editor. As antigas tabelas `clientes` e `atendimentos` não são alteradas nem importadas automaticamente. Antes de usar em produção, revise as permissões das tabelas antigas: as políticas desta migração protegem apenas as novas tabelas.
+**Situação da entrega:** a migração está no projeto e é testada localmente. As três migrações foram aplicadas ao Supabase remoto pelo SQL Editor. As antigas tabelas `clientes` e `atendimentos` não são alteradas nem importadas automaticamente. Antes de usar em produção, revise as permissões das tabelas antigas: as políticas desta migração protegem apenas as novas tabelas.
 
 Chaves administrativas devem existir somente nas variáveis privadas do servidor, nunca no código versionado.
 
@@ -31,9 +31,9 @@ Chaves administrativas devem existir somente nas variáveis privadas do servidor
 - Login com Supabase Auth, entrada por convite administrativo, definição obrigatória da senha pessoal e perfil com um WhatsApp único por profissional.
 - Cadastro de cliente com nome/WhatsApp obrigatório, anamnese recolhida e primeiro atendimento.
 - Telefones normalizados em formato internacional; duplicidade bloqueada dentro da mesma conta.
-- Atendimento com data real, intervalos de 7/15/30/90/180 dias ou valor personalizado (1–3650).
+- Atendimento com data real e vários dias de acompanhamento (1–3650), selecionados a partir dos modelos ou personalizados no atendimento.
 - Próximo contato às 9h em America/Sao_Paulo, calculado a partir da data do atendimento.
-- Um novo atendimento cancela o contato pendente anterior dentro da mesma transação. Um índice único e um bloqueio por cliente também protegem contra concorrência.
+- Um novo atendimento cancela as etapas pendentes da sequência anterior dentro da mesma transação, preservando as enviadas. Índices únicos por atendimento/dia, bloqueio por cliente e identificadores de solicitação evitam duplicatas.
 - Mensagens pendentes/atrasadas, programadas e histórico, busca, edição, reagendamento e cancelamento.
 - Link para WhatsApp e confirmação manual de envio. Abrir o link não marca como enviado. Na demonstração, o link não é aberto.
 - Ficha e histórico por cliente; edição da anamnese sem novo atendimento.
@@ -45,7 +45,7 @@ O número cadastrado identifica o profissional; o usuário precisa manter a sess
 
 `professionals`, `clients`, `client_anamneses`, `appointments`, `messages` usam RLS. IDs compostos impedem relações entre contas diferentes. Usuários autenticados não têm permissão de escrita direta no histórico ou na fila; funções RPC verificam a identidade e executam as operações atômicas. Não há exclusão de clientes pelo aplicativo. `archived_at` prepara o modelo para um fluxo de arquivamento futuro.
 
-A primeira versão usa um texto padrão editável por mensagem. Biblioteca de modelos personalizados e integração API do WhatsApp ficam para uma próxima versão.
+A página Mensagens padrão permite cadastrar, editar, arquivar e restaurar textos com vários dias (ex.: feedback nos dias 7 e 15; retorno no dia 60). A integração de envio automático via API do WhatsApp continua fora desta versão.
 
 ## Verificação
 
@@ -58,7 +58,7 @@ Os testes executam a migração em PostgreSQL local via PGlite com uma simulaç�
 
 ## Publicação
 
-Compatível com Vercel ou Netlify: comando `pnpm build`, pasta de saída `dist`. Configure `VITE_SUPABASE_URL` e `VITE_SUPABASE_PUBLISHABLE_KEY` no provedor antes do build. A navegação ocorre no cliente sem URLs adicionais. Publicado na Vercel em https://proxima-crm.vercel.app. Apresentação: https://proxima-crm.vercel.app/?view=portfolio. Demonstração: https://proxima-crm.vercel.app/?demo=1. As variáveis públicas do Supabase foram configuradas no ambiente de produção. As duas migrações SQL estão aplicadas no banco remoto.
+Compatível com Vercel ou Netlify: comando `pnpm build`, pasta de saída `dist`. Configure `VITE_SUPABASE_URL` e `VITE_SUPABASE_PUBLISHABLE_KEY` no provedor antes do build. A navegação ocorre no cliente sem URLs adicionais. Publicado na Vercel em https://proxima-crm.vercel.app. Apresentação: https://proxima-crm.vercel.app/?view=portfolio. Demonstração: https://proxima-crm.vercel.app/?demo=1. As variáveis públicas do Supabase foram configuradas no ambiente de produção. As três migrações SQL estão aplicadas no banco remoto.
 
 ## Apresentação comercial
 
@@ -86,3 +86,19 @@ O aplicativo não chama `signUp` nem oferece cadastro público. A demonstração
 Estado em 29/09/2026: deploy publicado com os endpoints de administração; conta do responsável criada como admin, com troca inicial obrigatória pendente. Verificados em produção: login temporário, bloqueio de convites antes da troca (403), rejeição de senha temporária como senha definitiva (400), account_ready=false. Não foi enviado convite real a terceiros durante a validação.
 
 Para entregar convites a pessoas fora da equipe do projeto Supabase, configure um provedor SMTP próprio em Authentication → Emails. O serviço de e-mail padrão do Supabase restringe destinatários. A entrega externa ainda precisa ser validada após essa configuração.
+
+
+## Sequências de acompanhamento
+
+A migração `202609300003_follow_up_sequences.sql` mantém mensagens e histórico existentes e adiciona:
+
+- `follow_up_templates`: modelos privados por profissional, com nome, texto, dias e arquivamento.
+- `messages.follow_up_day` e `template_title`: identificação de cada etapa, preservada como cópia do modelo no momento do agendamento.
+- `appointments.request_id`: proteção contra repetição da mesma solicitação. O campo existente `follow_up_interval_days` passa a representar o último dia da sequência.
+- RPCs `save_follow_up_template`, `archive_follow_up_template`, `create_client_sequence` e `record_appointment_sequence`, com verificação de conta, proprietário e validação no banco.
+
+Em **Mensagens padrão**, cadastre um modelo com os dias `7, 15` e outro com o dia `60`. Ao registrar o atendimento, marque os contatos desejados. O maior dia escolhido encerra a sequência. Use `{nome}` e `{servico}` nos textos; os valores são preenchidos ao salvar o atendimento. Modelos editados ou arquivados não modificam mensagens já programadas. Para alterá-las, use a Central de mensagens.
+
+São permitidas até 30 etapas por atendimento, sem dias duplicados. Um dia pertence a um único modelo ativo da conta. Mensagens com o mesmo texto em dias diferentes são etapas intencionais; repetição da mesma etapa ou solicitação é bloqueada. O envio continua manual pelo WhatsApp, com confirmação individual após enviar.
+
+A demonstração inclui modelos fictícios de feedback (7/15) e retorno (60). Contas reais começam com a biblioteca vazia e podem cadastrar seus próprios textos ou usar os exemplos oferecidos na página.

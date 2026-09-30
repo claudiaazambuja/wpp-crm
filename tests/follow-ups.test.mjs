@@ -1,0 +1,85 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { PGlite } from '@electric-sql/pglite';
+import { parseDays, templateSteps, renderMessage, validateSchedule } from '../src/follow-ups.js';
+
+test('follow-up days, template selection and message rendering', () => {
+  assert.deepEqual(parseDays('60, 7, 15'), [7,15,60]);
+  for (const invalid of ['', '7, 7', '0', '1.5', '-2', '3651', '7 dias']) assert.throws(() => parseDays(invalid));
+  assert.deepEqual(templateSteps([{id:'a',days:[15,7],title:'Feedback',body:'Oi'}, {id:'b',days:[60],archived_at:'today'}]).map(s=>s.day),[7,15]);
+  assert.equal(renderMessage('Oi, {nome}! Sobre {servico}: {nome}', 'Ana', 'limpeza'), 'Oi, Ana! Sobre limpeza: Ana');
+  assert.throws(() => validateSchedule([{day:7,body:'Oi',title:'A'}, {day:7,body:'Oi',title:'B'}]));
+  assert.throws(() => validateSchedule([]));
+});
+
+test('migration preserves history; multiple steps are isolated, atomic and idempotent', async t => {
+  const db = new PGlite(); t.after(() => db.close());
+  await db.exec(`set timezone='America/Sao_Paulo'; create role anon; create role authenticated; create role service_role;
+    create schema auth; create table auth.users(id uuid primary key,raw_app_meta_data jsonb);
+    create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;
+    grant usage on schema auth,public to authenticated,anon;
+    grant execute on function auth.uid() to authenticated,anon;`);
+  for (const name of ['202609290001_initial.sql','202609290002_account_access.sql']) await db.exec(await readFile(new URL(`../supabase/migrations/${name}`,import.meta.url),'utf8'));
+  const a='11111111-1111-4111-8111-111111111111', b='22222222-2222-4222-8222-222222222222';
+  await db.query('insert into auth.users(id) values($1),($2)',[a,b]);
+  await db.exec(`update auth.users set raw_app_meta_data='{"must_change_password":false}'`);
+  async function login(id) { await db.exec('reset role'); await db.query("select set_config('request.jwt.claim.sub',$1,false)",[id]); await db.exec('set role authenticated'); }
+  await login(a);
+  await db.query("insert into professionals(id,full_name,whatsapp_number) values($1,'Ana','+5511999999999')",[a]);
+  const client=(await db.query("select create_client('Maria','+5511999998888','Limpeza',current_date-2,15) id")).rows[0].id;
+  await db.exec('reset role');
+  await db.exec(await readFile(new URL('../supabase/migrations/202609300003_follow_up_sequences.sql',import.meta.url),'utf8'));
+  await login(a);
+  let messages=(await db.query('select * from messages')).rows;
+  assert.equal(messages.length,1); assert.equal(messages[0].follow_up_day,15); assert.equal(messages[0].status,'pending');
+  const template=(await db.query("select save_follow_up_template('Feedback','Oi, {nome}! Sobre {servico}.',array[7,15]) id")).rows[0].id;
+  await db.query("select save_follow_up_template('Retorno','Vamos agendar, {nome}?',array[60])");
+  await assert.rejects(db.query("select save_follow_up_template('Conflito','Oi',array[7])"),/já está/);
+  await assert.rejects(db.query("select save_follow_up_template('Duplicado','Oi',array[8,8])"),/diferentes/);
+  await assert.rejects(db.query("insert into follow_up_templates(title,body,days) values('Bypass','Oi',array[0])"),/permission denied/);
+  const schedule=[{day:7,title:'Feedback',body:'Oi, {nome}! Sobre {servico}.'},{day:15,title:'Feedback',body:'Oi, {nome}! Sobre {servico}.'},{day:60,title:'Retorno',body:'Vamos agendar, {nome}?'}];
+  const request='33333333-3333-4333-8333-333333333333';
+  async function record(plan=schedule, req=request, ownerClient=client) { return (await db.query('select record_appointment_sequence($1,$2,current_date,$3::jsonb,$4) id',[ownerClient,'Limpeza',JSON.stringify(plan),req])).rows[0].id; }
+  const appointment=await record();
+  assert.equal(await record(),appointment,'same request creates no extra appointment or messages');
+  messages=(await db.query("select * from messages where status='pending' order by follow_up_day")).rows;
+  assert.deepEqual(messages.map(m=>m.follow_up_day),[7,15,60]);
+  assert.equal(messages[0].body,'Oi, Maria! Sobre Limpeza.');
+  assert.equal((await db.query('select follow_up_interval_days from appointments where id=$1',[appointment])).rows[0].follow_up_interval_days,60);
+  assert.equal((await db.query("select count(*)::int n from messages where scheduled_at=((current_date+follow_up_day)+time '09:00') at time zone 'America/Sao_Paulo' and status='pending'")).rows[0].n,3);
+  await db.query("select save_follow_up_template('Feedback editado','Texto novo',array[7,15],$1)",[template]);
+  assert.equal((await db.query('select body from messages where id=$1',[messages[0].id])).rows[0].body,'Oi, Maria! Sobre Limpeza.','editing template preserves queued snapshot');
+  const invalidRequest='44444444-4444-4444-8444-444444444444';
+  await assert.rejects(record([schedule[0],schedule[0]],invalidRequest),/diferentes/);
+  assert.equal((await db.query("select count(*)::int n from messages where status='pending'")).rows[0].n,3,'failed request preserves previous queue');
+  await db.query("select update_pending_message($1,'send')",[messages[0].id]);
+  await assert.rejects(db.query("select update_pending_message($1,'send')",[messages[0].id]),/no longer pending/);
+  await record(schedule,invalidRequest);
+  assert.equal((await db.query("select count(*)::int n from messages where status='sent'")).rows[0].n,1);
+  assert.equal((await db.query("select count(*)::int n from messages where status='pending'")).rows[0].n,3);
+  assert.equal((await db.query("select count(*)::int n from messages where status='cancelled'")).rows[0].n,3);
+  await db.query('select archive_follow_up_template($1)',[template]);
+  assert.equal((await db.query("select count(*)::int n from messages where status='pending'")).rows[0].n,3);
+  await db.query("select save_follow_up_template('Feedback restaurado','Oi',array[7,15],$1)",[template]);
+  await login(b);
+  assert.equal((await db.query('select * from follow_up_templates')).rows.length,0);
+  assert.equal((await db.query('select * from messages')).rows.length,0);
+  await db.query("insert into professionals(id,full_name,whatsapp_number) values($1,'Bia','+5511999997777')",[b]);
+  await assert.rejects(db.query("select save_follow_up_template('Ataque','Oi',array[7],$1)",[template]),/não disponível/);
+  await assert.rejects(record(),/not available/);
+  await assert.rejects(db.query('select private.record_follow_up($1,\'\',current_date,\'[]\',null)',[client]),/permission denied/);
+  const reqB='55555555-5555-4555-8555-555555555555';
+  const create=()=>db.query("select create_client_sequence('Outra','+5511999996666','',current_date,$1::jsonb,$2) id",[JSON.stringify(schedule),reqB]);
+  const created=(await create()).rows[0].id;
+  assert.equal((await create()).rows[0].id,created);
+  assert.equal((await db.query('select count(*)::int n from appointments')).rows[0].n,1);
+  // Compatibility: an old browser tab can still schedule a single contact.
+  await db.query("select record_appointment($1,'',current_date,90)",[created]);
+  assert.equal((await db.query("select follow_up_day from messages where status='pending'")).rows[0].follow_up_day,90);
+  await db.exec('reset role');
+  await db.query(`update auth.users set raw_app_meta_data='{"must_change_password":true}' where id=$1`,[b]);
+  await db.exec('set role authenticated');
+  await assert.rejects(db.query("select save_follow_up_template('Blocked','Oi',array[7])"),/Initial password/);
+  await assert.rejects(create(),/Initial password/);
+});
