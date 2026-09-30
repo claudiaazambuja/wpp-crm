@@ -1,0 +1,7 @@
+.git
+.env*
+node_modules
+docs
+tests
+supabase
+README.md
